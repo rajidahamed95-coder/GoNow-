@@ -45,6 +45,7 @@ const ICON = {
   swap: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v14M7 18l-3-3M7 18l3-3M17 20V6M17 6l-3 3M17 6l3 3"/></svg>',
   chev: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
   out: '<svg viewBox="0 0 24 24"><path d="M7 17L17 7M9 7h8v8"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
 };
 
 // ── toast ───────────────────────────────────────────────────────────────────
@@ -53,6 +54,11 @@ function toast(msg, ms = 3600) {
   const t = $('#toast');
   t.textContent = msg; t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms);
+}
+function hideToast() {
+  const t = $('#toast');
+  if (t) t.classList.remove('show');
+  clearTimeout(toastT);
 }
 
 // ── views ───────────────────────────────────────────────────────────────────
@@ -384,20 +390,22 @@ function platform() {
   if (/Android/i.test(ua)) return 'android';
   return 'desktop';
 }
-async function handoff(id) {
+function handoff(id) {
   const p = state.market.providers.find((x) => x.id === id);
   if (!p || !state.trip) return;
+  if (p.handoff.prefill === 'documented') {
+    toast(`Opening ${p.name} with your trip. Nothing is booked until you confirm there.`, 4500);
+    navigateToProvider(p, { delay: 450 });
+    return;
+  }
+  openHandoffSheet(p);
+}
+
+function navigateToProvider(p, { delay = 0 } = {}) {
   const links = p.handoff.links(state.trip);
   const plat = platform();
-  const prefilled = p.handoff.prefill === 'documented';
-  if (!prefilled) {
-    try { await navigator.clipboard.writeText(state.to.title); toast(`Destination copied. Paste it into ${p.name}. Nothing is booked until you confirm there.`, 4500); }
-    catch { toast(`Opening ${p.name}. Enter your trip there. Nothing is booked until you confirm there.`, 4500); }
-  } else {
-    toast(`Opening ${p.name} with your trip. Nothing is booked until you confirm there.`, 4500);
-  }
   const go = (url) => { if (plat === 'desktop') window.open(url, '_blank', 'noopener'); else window.location.href = url; };
-  setTimeout(() => {
+  const launch = () => {
     if (links.universal) return go(links.universal);
     if (plat === 'desktop') return go(links.web);
     if (links.scheme) {
@@ -406,11 +414,180 @@ async function handoff(id) {
       return;
     }
     go(links[plat] || links.web);
-  }, 450);
+  };
+  if (delay) setTimeout(launch, delay);
+  else launch();
+}
+
+// ── handoff sheet (providers without a documented prefill link) ─────────────
+let handoffProvider = null;
+let handoffCopyState = 'idle'; // idle | to | from | fail
+
+function copyText(text) {
+  const value = String(text ?? '');
+  let ok = false;
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.setAttribute('readonly', '');
+  ta.setAttribute('aria-hidden', 'true');
+  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+  document.body.appendChild(ta);
+  const sel = document.getSelection();
+  const saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  if (saved && sel) { sel.removeAllRanges(); sel.addRange(saved); }
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try { navigator.clipboard.writeText(value); } catch { /* private mode / denied */ }
+  }
+  return ok;
+}
+
+function copyStatusLabel(kind) {
+  if (kind === 'to') return 'Destination copied';
+  if (kind === 'from') return 'Pickup copied';
+  if (kind === 'fail') return 'Couldn’t copy. Enter it in the app.';
+  return 'Copy destination';
+}
+
+function setCopyState(kind) {
+  handoffCopyState = kind;
+  const s = $('#handoffStatus');
+  if (!s) return;
+  s.className = 'sheet-status' + (kind === 'fail' ? ' err' : kind === 'idle' ? '' : ' ok');
+  s.textContent = copyStatusLabel(kind);
+}
+
+function fareFor(id) {
+  if (!state.trip) return null;
+  const out = estimateAll(state.market, state.trip, { when: whenDate(), payment: state.payment });
+  return out.results.find((r) => r.provider.id === id) || null;
+}
+
+function renderHandoffSheet() {
+  const p = handoffProvider;
+  const el = $('#handoff');
+  if (!p || !el) return;
+  const from = state.from || state.trip.from;
+  const to = state.to || state.trip.to;
+  const fare = fareFor(p.id);
+  const fareHtml = fare ? `
+    <div class="sheet-fare">
+      <div class="sheet-fare-label"><small>${esc(fare.label)} estimate</small><span>${esc(p.service)}</span></div>
+      <div class="sheet-fare-amt"><b class="num">${fmt(fare.total)}</b><span class="num">${fmtWhole(fare.low)}–${fmtWhole(fare.high)}</span></div>
+    </div>` : '';
+  const statusClass = handoffCopyState === 'fail' ? ' err' : handoffCopyState === 'idle' ? '' : ' ok';
+  el.innerHTML = `
+    <div class="sheet-backdrop" data-handoff-close></div>
+    <div class="sheet-panel" role="document">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2 id="handoffTitle">${esc(p.handoff.action)}</h2>
+        <button type="button" class="icon-btn" data-handoff-close aria-label="Close">${ICON.close}</button>
+      </div>
+      ${fareHtml}
+      <div class="sheet-stops">
+        <div class="sheet-stop">
+          <span class="dot"></span>
+          <span class="stop-text"><small>Pickup</small><b>${esc(from.title)}</b>${from.sub ? `<span>${esc(from.sub)}</span>` : ''}</span>
+        </div>
+        <div class="sheet-stop">
+          <span class="dot to"></span>
+          <span class="stop-text"><small>Destination</small><b>${esc(to.title)}</b>${to.sub ? `<span>${esc(to.sub)}</span>` : ''}</span>
+        </div>
+      </div>
+      <p class="sheet-note">${esc(p.name)} doesn’t let other apps fill in your trip, so paste the destination when it opens.</p>
+      <p id="handoffStatus" class="sheet-status${statusClass}" role="status">${esc(copyStatusLabel(handoffCopyState))}</p>
+      <button type="button" class="sheet-primary" data-handoff-open>Copy destination &amp; open ${esc(p.name)} ${ICON.out}</button>
+      <button type="button" class="sheet-secondary" data-handoff-copy-from>Copy pickup</button>
+    </div>`;
+}
+
+function openHandoffSheet(p) {
+  handoffProvider = p;
+  handoffCopyState = 'idle';
+  renderHandoffSheet();
+  const el = $('#handoff');
+  hideToast();
+  el.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('sheet-open');
+  requestAnimationFrame(() => {
+    el.classList.add('open');
+    const btn = el.querySelector('[data-handoff-open]');
+    if (btn) btn.focus();
+  });
+}
+
+function closeHandoffSheet() {
+  const el = $('#handoff');
+  if (!el || !el.classList.contains('open')) return;
+  el.classList.remove('open');
+  el.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('sheet-open');
+  const panel = el.querySelector('.sheet-panel');
+  if (panel) panel.style.transform = '';
+  const bd = el.querySelector('.sheet-backdrop');
+  if (bd) bd.style.opacity = '';
+  handoffProvider = null;
+}
+
+function confirmHandoff() {
+  const p = handoffProvider;
+  if (!p) return;
+  const text = (state.to && state.to.title) || (state.trip && state.trip.to && state.trip.to.title) || '';
+  // Clipboard write must stay in this click tick, before any navigation (iOS).
+  const ok = copyText(text);
+  setCopyState(ok ? 'to' : 'fail');
+  navigateToProvider(p, { delay: 0 });
+}
+
+function copyHandoffPickup() {
+  const text = (state.from && state.from.title) || (state.trip && state.trip.from && state.trip.from.title) || '';
+  const ok = copyText(text);
+  setCopyState(ok ? 'from' : 'fail');
+}
+
+function bindSheetGestures() {
+  const el = $('#handoff');
+  if (!el) return;
+  let drag = null;
+  el.addEventListener('touchstart', (e) => {
+    if (!el.classList.contains('open') || e.touches.length !== 1) return;
+    if (!e.target.closest('.sheet-handle, .sheet-head')) return;
+    const panel = el.querySelector('.sheet-panel');
+    if (!panel) return;
+    drag = { y: e.touches[0].clientY, dy: 0, panel };
+    panel.style.transition = 'none';
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (!drag) return;
+    drag.dy = Math.max(0, e.touches[0].clientY - drag.y);
+    drag.panel.style.transform = `translateY(${drag.dy}px)`;
+    const bd = el.querySelector('.sheet-backdrop');
+    if (bd) bd.style.opacity = String(Math.max(0.12, 1 - drag.dy / 320));
+  }, { passive: true });
+  const end = () => {
+    if (!drag) return;
+    const { dy, panel } = drag;
+    drag = null;
+    panel.style.transition = '';
+    const bd = el.querySelector('.sheet-backdrop');
+    if (bd) bd.style.opacity = '';
+    if (dy > 88) closeHandoffSheet();
+    else panel.style.transform = '';
+  };
+  el.addEventListener('touchend', end);
+  el.addEventListener('touchcancel', end);
 }
 
 // ── events ──────────────────────────────────────────────────────────────────
 document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-handoff-close]')) { closeHandoffSheet(); return; }
+  if (e.target.closest('[data-handoff-open]')) { confirmHandoff(); return; }
+  if (e.target.closest('[data-handoff-copy-from]')) { copyHandoffPickup(); return; }
   const t = e.target.closest('button, [data-toggle]');
   if (!t) return;
   if (t.matches('.stop')) return openPicker(t.dataset.field);
@@ -479,12 +656,15 @@ document.addEventListener('change', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && pickerCtx) closePicker();
+  if (e.key !== 'Escape') return;
+  if ($('#handoff') && $('#handoff').classList.contains('open')) { closeHandoffSheet(); return; }
+  if (pickerCtx) closePicker();
 });
 
 // ── boot ────────────────────────────────────────────────────────────────────
 function boot() {
   $('#marketPill').textContent = state.market.name;
+  bindSheetGestures();
   renderHome();
   locate({ silent: true });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
