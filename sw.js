@@ -1,6 +1,6 @@
 // Minimal offline shell. Network-first for app files (so updates land fast),
 // cache fallback offline. API calls (OneMap/OSRM/Nominatim) are never cached.
-const CACHE = 'gonow-v1';
+const CACHE = 'gonow-v2';
 const SHELL = ['./', 'index.html', 'css/styles.css', 'js/app.js', 'js/engine.js', 'js/geo.js',
   'js/markets/index.js', 'js/markets/sg.js', 'manifest.webmanifest', 'icons/icon.svg'];
 self.addEventListener('install', (e) => {
